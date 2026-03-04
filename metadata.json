@@ -1,0 +1,5 @@
+{
+  "name": "POS Restauração Offline",
+  "description": "Sistema de Ponto de Venda offline para pequenos restaurantes e hamburgarias, com gestão de stock, vendas e relatórios.",
+  "requestFramePermissions": []
+}
