@@ -13,6 +13,7 @@ app.use(express.json());
 // Database setup
 const dbPath = path.join(process.cwd(), "pos.db");
 const db = new Database(dbPath);
+db.pragma('foreign_keys = ON');
 
 // Backup setup
 const backupsDir = path.join(process.cwd(), "backups");
@@ -190,9 +191,26 @@ app.put("/api/users/:id", (req, res) => {
 
 app.delete("/api/users/:id", (req, res) => {
   const { id } = req.params;
-  // Prevent deleting the last admin or the current user (handled on frontend mostly, but good to have)
-  db.prepare("DELETE FROM users WHERE id = ?").run(id);
-  res.json({ success: true });
+  try {
+    // Prevent deleting the last admin
+    const adminCount = db.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'admin'").get() as { count: number };
+    const userToDelete = db.prepare("SELECT role FROM users WHERE id = ?").get(id) as { role: string };
+    
+    if (userToDelete && userToDelete.role === 'admin' && adminCount.count <= 1) {
+      return res.status(400).json({ error: "Não é possível eliminar o último administrador do sistema." });
+    }
+
+    // Check if user has sales
+    const salesCount = db.prepare("SELECT COUNT(*) as count FROM sales WHERE user_id = ?").get(id) as { count: number };
+    if (salesCount.count > 0) {
+      return res.status(400).json({ error: "Não é possível eliminar um utilizador com histórico de vendas. Considere mudar a palavra-passe para impedir o acesso." });
+    }
+
+    db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Erro ao eliminar utilizador" });
+  }
 });
 
 app.get("/api/products", (req, res) => {
@@ -257,6 +275,13 @@ app.patch("/api/products/:id/stock", (req, res) => {
   res.json({ success: true });
 });
 
+app.patch("/api/products/:id/active", (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body;
+  db.prepare("UPDATE products SET active = ? WHERE id = ?").run(active, id);
+  res.json({ success: true });
+});
+
 app.get("/api/categories", (req, res) => {
   const categories = db.prepare("SELECT * FROM categories").all();
   res.json(categories);
@@ -301,12 +326,28 @@ app.delete("/api/categories/:id", (req, res) => {
 app.delete("/api/products/:id", (req, res) => {
   const { id } = req.params;
   try {
-    db.prepare("DELETE FROM stock WHERE product_id = ?").run(id);
-    db.prepare("DELETE FROM product_price_history WHERE product_id = ?").run(id);
-    db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    // Check if product has sales
+    const sales = db.prepare("SELECT COUNT(*) as count FROM sale_items WHERE product_id = ?").get(id) as { count: number };
+    
+    if (sales.count > 0) {
+      // If has sales, we recommend deactivating instead of deleting to preserve history
+      // But if the user really wants to delete, we should probably allow it if they confirm
+      // For now, let's just soft-delete (deactivate) by default if it has sales
+      db.prepare("UPDATE products SET active = 0 WHERE id = ?").run(id);
+      return res.json({ success: true, message: "Produto desativado em vez de eliminado por possuir histórico de vendas." });
+    }
+
+    const transaction = db.transaction(() => {
+      db.prepare("DELETE FROM stock WHERE product_id = ?").run(id);
+      db.prepare("DELETE FROM product_price_history WHERE product_id = ?").run(id);
+      db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    });
+    
+    transaction();
     res.json({ success: true });
   } catch (error) {
-    res.status(400).json({ error: "Erro ao eliminar produto" });
+    console.error("Delete product error:", error);
+    res.status(400).json({ error: "Erro ao eliminar produto: " + (error as Error).message });
   }
 });
 
@@ -577,6 +618,33 @@ app.post("/api/admin/import", (req, res) => {
   } catch (error) {
     console.error("Import failed:", error);
     res.status(500).json({ error: "Erro ao importar dados: " + (error as Error).message });
+  }
+});
+
+app.post("/api/admin/reset", (req, res) => {
+  try {
+    const transaction = db.transaction(() => {
+      db.prepare("DELETE FROM sale_items").run();
+      db.prepare("DELETE FROM sales").run();
+      db.prepare("DELETE FROM stock").run();
+      db.prepare("DELETE FROM product_price_history").run();
+      db.prepare("DELETE FROM products").run();
+      db.prepare("DELETE FROM categories").run();
+      db.prepare("DELETE FROM cash_register").run();
+      db.prepare("DELETE FROM settings").run();
+      db.prepare("DELETE FROM users WHERE username != 'admin'").run();
+      
+      // Re-initialize default settings
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('establishment_name', 'POS Restauração')").run();
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('establishment_nif', '500123456')").run();
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('establishment_address', 'Endereço do Estabelecimento')").run();
+      db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('establishment_phone', '900000000')").run();
+    });
+    
+    transaction();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: "Erro ao resetar sistema" });
   }
 });
 

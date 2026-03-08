@@ -22,33 +22,35 @@ import {
   Download,
   FileText,
   AlertTriangle,
-  Wifi,
-  WifiOff,
-  Cloud,
   Upload,
   Database as DatabaseIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { db, initializeDB } from './db';
+import { useLiveQuery } from 'dexie-react-hooks';
 
 // Types
 interface User {
-  id: number;
+  id?: number;
   username: string;
   role: 'admin' | 'operator';
+  password?: string;
 }
 
 interface Product {
-  id: number;
+  id?: number;
   name: string;
   price: number;
   category_id: number;
-  category_name: string;
+  category_name?: string;
   active: number;
   is_prepared: number;
   stock_quantity: number | null;
   min_quantity: number | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface CartItem extends Product {
@@ -56,26 +58,12 @@ interface CartItem extends Product {
 }
 
 interface Category {
-  id: number;
+  id?: number;
   name: string;
 }
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
-
-  useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, []);
 
   const [view, setView] = useState<'pos' | 'stock' | 'reports' | 'admin' | 'history'>('pos');
   const [products, setProducts] = useState<Product[]>([]);
@@ -102,58 +90,88 @@ export default function App() {
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [userForm, setUserForm] = useState({ username: '', password: '', role: 'operator' as 'admin' | 'operator' });
-  const [adminTab, setAdminTab] = useState<'products' | 'users' | 'categories' | 'sync'>('products');
+  const [adminTab, setAdminTab] = useState<'products' | 'users' | 'categories' | 'settings' | 'sync'>('products');
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
   const [selectedStockProduct, setSelectedStockProduct] = useState<Product | null>(null);
   const [newStockQuantity, setNewStockQuantity] = useState<string>('');
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
-  const [backups, setBackups] = useState<{ name: string, size: number, created_at: string }[]>([]);
+  const [isDeleteCategoryModalOpen, setIsDeleteCategoryModalOpen] = useState(false);
+  const [categoryToDelete, setCategoryToDelete] = useState<number | null>(null);
+  const [isDeleteProductModalOpen, setIsDeleteProductModalOpen] = useState(false);
+  const [productToDelete, setProductToDelete] = useState<number | null>(null);
+  const [isDeleteUserModalOpen, setIsDeleteUserModalOpen] = useState(false);
+  const [userToDeleteId, setUserToDeleteId] = useState<number | null>(null);
+  const [physicalCashCount, setPhysicalCashCount] = useState<string>('');
+  const [cashNotes, setCashNotes] = useState<string>('');
   const [isBackupLoading, setIsBackupLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [newPassword, setNewPassword] = useState('');
 
-  const fetchBackups = async () => {
-    try {
-      const res = await fetch('/api/admin/backups');
-      const data = await res.json();
-      setBackups(data);
-    } catch (error) {
-      console.error('Error fetching backups:', error);
-    }
+  const [establishmentInfo, setEstablishmentInfo] = useState({
+    establishment_name: 'POS Restauração',
+    establishment_nif: '500123456',
+    establishment_address: 'Endereço do Estabelecimento',
+    establishment_phone: '900000000'
+  });
+
+  // Initialize DB on mount
+  useEffect(() => {
+    initializeDB().then(() => {
+      fetchProducts();
+      fetchCategories();
+      fetchCashStatus();
+      fetchSettings();
+    });
+  }, []);
+
+  const fetchProducts = async () => {
+    const prods = await db.products.toArray();
+    const cats = await db.categories.toArray();
+    const stocks = await db.stock.toArray();
+    
+    const enrichedProducts = prods.map(p => {
+      const cat = cats.find(c => c.id === p.category_id);
+      const stock = stocks.find(s => s.product_id === p.id);
+      return {
+        ...p,
+        category_name: cat?.name || 'Sem Categoria',
+        stock_quantity: stock?.quantity || 0,
+        min_quantity: stock?.min_quantity || 5
+      } as Product;
+    });
+    setProducts(enrichedProducts);
   };
 
-  const deleteBackup = async (name: string) => {
-    if (!confirm(`Deseja eliminar o backup ${name}?`)) return;
-    try {
-      const res = await fetch(`/api/admin/backups/${name}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchBackups();
-      }
-    } catch (error) {
-      console.error('Error deleting backup:', error);
-    }
+  const fetchCategories = async () => {
+    const cats = await db.categories.toArray();
+    setCategories(cats);
   };
 
-  const handleManualBackup = async () => {
-    setIsBackupLoading(true);
-    try {
-      const res = await fetch('/api/admin/backup', { method: 'POST' });
-      if (res.ok) {
-        alert('Backup realizado com sucesso!');
-        fetchBackups();
-      }
-    } catch (error) {
-      console.error('Error performing backup:', error);
-    } finally {
-      setIsBackupLoading(false);
-    }
+  const fetchUsers = async () => {
+    const u = await db.users.toArray();
+    setUsers(u.map(({ password, ...rest }) => rest as User));
+  };
+
+  const fetchCashStatus = async () => {
+    const status = await db.cashRegister.where('status').equals('open').last();
+    setCashStatus(status || { status: 'closed' });
   };
 
   const exportDatabase = async () => {
+    setIsBackupLoading(true);
     try {
-      const response = await fetch('/api/admin/export');
-      const data = await response.json();
+      const data = {
+        users: await db.users.toArray(),
+        categories: await db.categories.toArray(),
+        products: await db.products.toArray(),
+        stock: await db.stock.toArray(),
+        sales: await db.sales.toArray(),
+        saleItems: await db.saleItems.toArray(),
+        settings: await db.settings.toArray(),
+        cashRegister: await db.cashRegister.toArray(),
+        export_date: new Date().toISOString()
+      };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -161,9 +179,40 @@ export default function App() {
       a.download = `pos_backup_${new Date().toISOString().split('T')[0]}.json`;
       a.click();
       URL.revokeObjectURL(url);
+      alert('Backup local realizado com sucesso!');
     } catch (error) {
-      console.error('Erro ao exportar backup:', error);
-      alert('Erro ao exportar backup');
+      console.error('Error performing backup:', error);
+    } finally {
+      setIsBackupLoading(false);
+    }
+  };
+
+  const handleResetSystem = async () => {
+    if (!confirm('AVISO CRÍTICO: Esta ação irá apagar TODOS os dados locais do sistema. Apenas o utilizador admin será mantido. Deseja continuar?')) return;
+    if (!confirm('TEM A CERTEZA? Esta ação não pode ser desfeita.')) return;
+
+    try {
+      await db.transaction('rw', [db.sales, db.saleItems, db.stock, db.products, db.categories, db.cashRegister, db.settings, db.users], async () => {
+        await db.saleItems.clear();
+        await db.sales.clear();
+        await db.stock.clear();
+        await db.products.clear();
+        await db.categories.clear();
+        await db.cashRegister.clear();
+        await db.settings.clear();
+        await db.users.where('username').notEqual('admin').delete();
+        
+        await db.settings.bulkPut([
+          { key: 'establishment_name', value: 'POS Restauração' },
+          { key: 'establishment_nif', value: '500123456' },
+          { key: 'establishment_address', value: 'Endereço do Estabelecimento' },
+          { key: 'establishment_phone', value: '900000000' }
+        ]);
+      });
+      alert('Sistema resetado com sucesso! O sistema será reiniciado.');
+      window.location.reload();
+    } catch (error) {
+      console.error('Error resetting system:', error);
     }
   };
 
@@ -181,19 +230,28 @@ export default function App() {
       const text = await file.text();
       const data = JSON.parse(text);
 
-      const response = await fetch('/api/admin/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
+      await db.transaction('rw', [db.users, db.categories, db.products, db.stock, db.sales, db.saleItems, db.settings, db.cashRegister], async () => {
+        await db.saleItems.clear();
+        await db.sales.clear();
+        await db.stock.clear();
+        await db.products.clear();
+        await db.categories.clear();
+        await db.cashRegister.clear();
+        await db.settings.clear();
+        await db.users.clear();
+
+        if (data.users) await db.users.bulkPut(data.users);
+        if (data.categories) await db.categories.bulkPut(data.categories);
+        if (data.products) await db.products.bulkPut(data.products);
+        if (data.stock) await db.stock.bulkPut(data.stock);
+        if (data.sales) await db.sales.bulkPut(data.sales);
+        if (data.saleItems) await db.saleItems.bulkPut(data.saleItems);
+        if (data.settings) await db.settings.bulkPut(data.settings);
+        if (data.cashRegister) await db.cashRegister.bulkPut(data.cashRegister);
       });
 
-      if (response.ok) {
-        alert('Dados importados com sucesso! O sistema será reiniciado.');
-        window.location.reload();
-      } else {
-        const err = await response.json();
-        throw new Error(err.error || 'Erro desconhecido');
-      }
+      alert('Dados importados com sucesso! O sistema será reiniciado.');
+      window.location.reload();
     } catch (error) {
       console.error('Erro ao importar dados:', error);
       alert('Erro ao importar dados: ' + (error as Error).message);
@@ -218,13 +276,6 @@ export default function App() {
   const [isProductDetailsModalOpen, setIsProductDetailsModalOpen] = useState(false);
   const [productDetails, setProductDetails] = useState<{ product: any, history: any[] } | null>(null);
 
-  const [establishmentInfo, setEstablishmentInfo] = useState({
-    establishment_name: '',
-    establishment_nif: '',
-    establishment_address: '',
-    establishment_phone: ''
-  });
-
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [categoryForm, setCategoryForm] = useState({ name: '' });
@@ -245,16 +296,20 @@ export default function App() {
         fetchProducts();
         fetchUsers();
         fetchCategories();
-        fetchBackups();
       }
     }
   }, [user, view]);
 
   const fetchSettings = async () => {
     try {
-      const response = await fetch('/api/settings');
-      const data = await response.json();
-      setEstablishmentInfo(data);
+      const s = await db.settings.toArray();
+      const settingsObj = s.reduce((acc, curr) => {
+        acc[curr.key] = curr.value;
+        return acc;
+      }, {} as any);
+      if (Object.keys(settingsObj).length > 0) {
+        setEstablishmentInfo(prev => ({ ...prev, ...settingsObj }));
+      }
     } catch (error) {
       console.error('Error fetching settings:', error);
     }
@@ -262,28 +317,58 @@ export default function App() {
 
   const handleSaveSettings = async () => {
     try {
-      const response = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(establishmentInfo)
+      await db.transaction('rw', db.settings, async () => {
+        for (const [key, value] of Object.entries(establishmentInfo)) {
+          await db.settings.put({ key, value: value as string });
+        }
       });
-      if (response.ok) {
-        alert('Informações do estabelecimento guardadas com sucesso!');
-      } else {
-        alert('Erro ao guardar informações.');
-      }
+      alert('Informações do estabelecimento guardadas com sucesso!');
     } catch (error) {
       console.error('Error saving settings:', error);
-      alert('Erro de conexão ao servidor.');
+      alert('Erro ao guardar informações.');
     }
   };
 
   const fetchReportsData = async () => {
-    const [daily, monthly, top] = await Promise.all([
-      fetch('/api/reports/daily').then(r => r.json()),
-      fetch('/api/reports/monthly').then(r => r.json()),
-      fetch('/api/reports/top-products').then(r => r.json())
-    ]);
+    const sales = await db.sales.toArray();
+    const saleItems = await db.saleItems.toArray();
+    const products = await db.products.toArray();
+
+    // Daily Report
+    const dailyMap = new Map();
+    sales.forEach(s => {
+      const date = s.created_at.split('T')[0];
+      const current = dailyMap.get(date) || { total_sales: 0, count: 0 };
+      dailyMap.set(date, { 
+        total_sales: current.total_sales + s.total, 
+        count: current.count + 1 
+      });
+    });
+    const daily = Array.from(dailyMap.entries()).map(([date, data]) => ({ date, ...data })).sort((a, b) => b.date.localeCompare(a.date));
+
+    // Monthly Report
+    const monthlyMap = new Map();
+    sales.forEach(s => {
+      const month = s.created_at.substring(0, 7);
+      const current = monthlyMap.get(month) || { total_sales: 0, count: 0 };
+      monthlyMap.set(month, { 
+        total_sales: current.total_sales + s.total, 
+        count: current.count + 1 
+      });
+    });
+    const monthly = Array.from(monthlyMap.entries()).map(([month, data]) => ({ month, ...data })).sort((a, b) => b.month.localeCompare(a.month));
+
+    // Top Products
+    const productQtyMap = new Map();
+    saleItems.forEach(si => {
+      const current = productQtyMap.get(si.product_id) || 0;
+      productQtyMap.set(si.product_id, current + si.quantity);
+    });
+    const top = Array.from(productQtyMap.entries()).map(([pid, qty]) => {
+      const p = products.find(prod => prod.id === pid);
+      return { name: p?.name || 'Removido', total_qty: qty };
+    }).sort((a, b) => b.total_qty - a.total_qty).slice(0, 10);
+
     setDailyReport(daily);
     setMonthlyReport(monthly);
     setTopProductsReport(top);
@@ -410,30 +495,26 @@ export default function App() {
     printWindow.document.close();
   };
 
-  const fetchUsers = async () => {
-    const res = await fetch('/api/users');
-    const data = await res.json();
-    setUsers(data);
-  };
-
   const handleUpdateStock = async () => {
-    if (!selectedStockProduct || newStockQuantity === '') return;
+    if (!selectedStockProduct?.id || newStockQuantity === '') return;
     
+    const quantity = parseInt(newStockQuantity);
+
     try {
-      const response = await fetch(`/api/products/${selectedStockProduct.id}/stock`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ quantity: parseInt(newStockQuantity) })
-      });
+      await db.stock.update(selectedStockProduct.id, { quantity });
       
-      if (response.ok) {
-        fetchProducts();
-        setIsStockModalOpen(false);
-        setSelectedStockProduct(null);
-        setNewStockQuantity('');
-      }
+      // Optimistic update
+      setProducts(prev => prev.map(p => 
+        p.id === selectedStockProduct.id ? { ...p, stock_quantity: quantity } : p
+      ));
+
+      setIsStockModalOpen(false);
+      setSelectedStockProduct(null);
+      setNewStockQuantity('');
+      fetchProducts();
     } catch (error) {
       console.error('Error updating stock:', error);
+      alert('Erro ao atualizar stock localmente');
     }
   };
 
@@ -461,186 +542,225 @@ export default function App() {
       return;
     }
 
-    const method = editingProduct ? 'PUT' : 'POST';
-    const url = editingProduct ? `/api/products/${editingProduct.id}` : '/api/products';
-    
     try {
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...productForm,
-          price: parseFloat(productForm.price),
-          initial_stock: parseFloat(productForm.initial_stock || '0')
-        })
-      });
-      
-      if (response.ok) {
-        fetchProducts();
-        setIsProductModalOpen(false);
-        setEditingProduct(null);
-        setProductForm({ name: '', price: '', category_id: categories[0]?.id || 0, is_prepared: 0, initial_stock: '0', active: 1 });
+      const productData = {
+        name: productForm.name,
+        price: parseFloat(productForm.price),
+        category_id: productForm.category_id,
+        is_prepared: productForm.is_prepared,
+        active: productForm.active,
+        created_at: editingProduct?.created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      if (editingProduct?.id) {
+        await db.products.update(editingProduct.id, productData);
       } else {
-        const error = await response.json();
-        alert(error.error || 'Erro ao guardar produto');
+        const productId = await db.products.add(productData);
+        if (productForm.is_prepared === 0) {
+          await db.stock.add({
+            product_id: productId as number,
+            quantity: parseFloat(productForm.initial_stock || '0'),
+            min_quantity: 5
+          });
+        }
       }
+      
+      fetchProducts();
+      setIsProductModalOpen(false);
+      setEditingProduct(null);
+      setProductForm({ name: '', price: '', category_id: categories[0]?.id || 0, is_prepared: 0, initial_stock: '0', active: 1 });
     } catch (error) {
       console.error('Error saving product:', error);
-      alert('Erro de conexão ao servidor');
+      alert('Erro ao guardar produto');
     }
   };
 
   const handleSaveCategory = async () => {
     if (!categoryForm.name) return;
 
-    const method = editingCategory ? 'PUT' : 'POST';
-    const url = editingCategory ? `/api/categories/${editingCategory.id}` : '/api/categories';
-
     try {
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(categoryForm)
-      });
-
-      if (response.ok) {
-        fetchCategories();
-        setIsCategoryModalOpen(false);
-        setEditingCategory(null);
-        setCategoryForm({ name: '' });
+      if (editingCategory?.id) {
+        await db.categories.update(editingCategory.id, { name: categoryForm.name });
       } else {
-        const error = await response.json();
-        alert(error.error || 'Erro ao guardar categoria');
+        await db.categories.add({ name: categoryForm.name });
       }
+      fetchCategories();
+      setIsCategoryModalOpen(false);
+      setEditingCategory(null);
+      setCategoryForm({ name: '' });
     } catch (error) {
       console.error('Error saving category:', error);
+      alert('Erro ao guardar categoria');
     }
   };
 
   const handleDeleteCategory = async (id: number) => {
-    if (!confirm('Tem certeza que deseja eliminar esta categoria?')) return;
-
     try {
-      const response = await fetch(`/api/categories/${id}`, { method: 'DELETE' });
-      if (response.ok) {
-        fetchCategories();
-      } else {
-        const error = await response.json();
-        alert(error.error || 'Erro ao eliminar categoria');
+      const productsInCat = await db.products.where('category_id').equals(id).count();
+      if (productsInCat > 0) {
+        alert('Não é possível eliminar uma categoria com produtos associados');
+        return;
       }
+      await db.categories.delete(id);
+      alert('Categoria eliminada com sucesso');
+      setIsDeleteCategoryModalOpen(false);
+      setCategoryToDelete(null);
+      fetchCategories();
     } catch (error) {
       console.error('Error deleting category:', error);
+      alert('Erro ao eliminar categoria');
     }
   };
 
   const fetchProductDetails = async (id: number) => {
     try {
-      const response = await fetch(`/api/products/${id}/details`);
-      const data = await response.json();
-      setProductDetails(data);
+      const product = await db.products.get(id);
+      const stock = await db.stock.where('product_id').equals(id).first();
+      // Price history is not implemented in local DB yet, but we can mock it or add it later
+      setProductDetails({ product: { ...product, stock_quantity: stock?.quantity }, history: [] });
       setIsProductDetailsModalOpen(true);
     } catch (error) {
       console.error('Error fetching product details:', error);
     }
   };
 
-  const handleDeleteProduct = async (id: number) => {
-    if (!confirm('Tem a certeza que deseja remover este produto?')) return;
-    const res = await fetch(`/api/products/${id}`, { method: 'DELETE' });
-    if (res.ok) fetchProducts();
+  const handleDeleteProduct = (id: number) => {
+    setProductToDelete(id);
+    setIsDeleteProductModalOpen(true);
+  };
+
+  const confirmDeleteProduct = async () => {
+    if (!productToDelete) return;
+    const id = productToDelete;
+    try {
+      const salesCount = await db.saleItems.where('product_id').equals(id).count();
+      if (salesCount > 0) {
+        await db.products.update(id, { active: 0 });
+        alert('Produto desativado em vez de eliminado por possuir histórico de vendas.');
+      } else {
+        await db.transaction('rw', [db.products, db.stock], async () => {
+          await db.products.delete(id);
+          await db.stock.where('product_id').equals(id).delete();
+        });
+      }
+      setIsDeleteProductModalOpen(false);
+      setProductToDelete(null);
+      fetchProducts();
+    } catch (error) {
+      console.error('Error deleting product:', error);
+      alert('Erro ao eliminar produto');
+    }
+  };
+
+  const handleToggleProductActive = async (id: number, active: number) => {
+    try {
+      await db.products.update(id, { active });
+      fetchProducts();
+    } catch (error) {
+      console.error('Error toggling product active:', error);
+      alert('Erro ao alterar estado do produto');
+    }
   };
 
   const handleSaveUser = async () => {
-    const method = editingUser ? 'PUT' : 'POST';
-    const url = editingUser ? `/api/users/${editingUser.id}` : '/api/users';
-    
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userForm),
-    });
-
-    if (res.ok) {
+    try {
+      if (editingUser?.id) {
+        const updateData: any = { username: userForm.username, role: userForm.role };
+        if (userForm.password) updateData.password = userForm.password;
+        await db.users.update(editingUser.id, updateData);
+      } else {
+        await db.users.add(userForm);
+      }
       setIsUserModalOpen(false);
       setEditingUser(null);
       setUserForm({ username: '', password: '', role: 'operator' });
       fetchUsers();
-    } else {
-      const data = await res.json();
-      alert(data.error || 'Erro ao guardar utilizador');
+    } catch (error) {
+      alert('Erro ao guardar utilizador');
     }
   };
 
-  const handleDeleteUser = async (id: number) => {
+  const handleDeleteUser = (id: number) => {
     if (id === user?.id) {
       alert('Não pode remover o utilizador atual.');
       return;
     }
-    if (!confirm('Tem a certeza que deseja remover este utilizador?')) return;
-    const res = await fetch(`/api/users/${id}`, { method: 'DELETE' });
-    if (res.ok) fetchUsers();
+    setUserToDeleteId(id);
+    setIsDeleteUserModalOpen(true);
+  };
+
+  const confirmDeleteUser = async () => {
+    if (!userToDeleteId) return;
+    const id = userToDeleteId;
+    try {
+      const adminCount = await db.users.where('role').equals('admin').count();
+      const userToDelete = await db.users.get(id);
+      if (userToDelete?.role === 'admin' && adminCount <= 1) {
+        alert('Não é possível eliminar o último administrador do sistema.');
+        setIsDeleteUserModalOpen(false);
+        setUserToDeleteId(null);
+        return;
+      }
+
+      const salesCount = await db.sales.where('user_id').equals(id).count();
+      if (salesCount > 0) {
+        alert('Não é possível eliminar um utilizador com histórico de vendas.');
+        setIsDeleteUserModalOpen(false);
+        setUserToDeleteId(null);
+        return;
+      }
+
+      await db.users.delete(id);
+      setIsDeleteUserModalOpen(false);
+      setUserToDeleteId(null);
+      fetchUsers();
+    } catch (error) {
+      console.error('Error deleting user:', error);
+      alert('Erro ao eliminar utilizador');
+    }
   };
 
   const fetchSalesHistory = async () => {
-    const res = await fetch('/api/sales');
-    const data = await res.json();
-    setSalesHistory(data);
-  };
-
-  const fetchProducts = async () => {
-    const res = await fetch('/api/products');
-    const data = await res.json();
-    setProducts(data);
-  };
-
-  const fetchCategories = async () => {
-    const res = await fetch('/api/categories');
-    const data = await res.json();
-    setCategories(data);
-  };
-
-  const fetchCashStatus = async () => {
-    const res = await fetch('/api/cash/status');
-    const data = await res.json();
-    setCashStatus(data);
-    if (data.status === 'closed') {
-      setIsCashModalOpen(true);
-    }
+    const sales = await db.sales.orderBy('created_at').reverse().toArray();
+    const users = await db.users.toArray();
+    const products = await db.products.toArray();
+    
+    const salesWithDetails = await Promise.all(sales.map(async (sale) => {
+      const items = await db.saleItems.where('sale_id').equals(sale.id!).toArray();
+      const itemsWithNames = items.map(item => {
+        const p = products.find(prod => prod.id === item.product_id);
+        return { ...item, product_name: p?.name || 'Produto Removido' };
+      });
+      const operator = users.find(u => u.id === sale.user_id);
+      return { ...sale, items: itemsWithNames, operator_name: operator?.username || 'Sistema' };
+    }));
+    
+    setSalesHistory(salesWithDetails);
   };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
     try {
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(loginForm),
-      });
-      if (res.ok) {
-        const userData = await res.json();
-        setUser(userData);
+      const foundUser = await db.users.where({ username: loginForm.username, password: loginForm.password }).first();
+      if (foundUser) {
+        setUser(foundUser);
       } else {
         setLoginError('Credenciais inválidas');
       }
     } catch (err) {
-      setLoginError('Erro ao conectar ao servidor');
+      setLoginError('Erro ao aceder à base de dados local');
     }
   };
 
   const handleUpdatePassword = async () => {
-    if (!newPassword || !user) return;
+    if (!newPassword || !user?.id) return;
     try {
-      const response = await fetch(`/api/users/${user.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...user, password: newPassword })
-      });
-      if (response.ok) {
-        alert('Palavra-passe atualizada com sucesso!');
-        setIsProfileModalOpen(false);
-        setNewPassword('');
-      }
+      await db.users.update(user.id, { password: newPassword });
+      alert('Palavra-passe atualizada com sucesso!');
+      setIsProfileModalOpen(false);
+      setNewPassword('');
     } catch (error) {
       console.error('Erro ao atualizar palavra-passe:', error);
       alert('Erro ao atualizar palavra-passe');
@@ -648,11 +768,12 @@ export default function App() {
   };
 
   const handleOpenCash = async () => {
-    if (!openingBalance) return;
-    await fetch('/api/cash/open', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: user?.id, opening_balance: parseFloat(openingBalance) }),
+    if (!openingBalance || !user?.id) return;
+    await db.cashRegister.add({
+      user_id: user.id,
+      opening_balance: parseFloat(openingBalance),
+      status: 'open',
+      opened_at: new Date().toISOString()
     });
     setIsCashModalOpen(false);
     fetchCashStatus();
@@ -661,9 +782,20 @@ export default function App() {
   const handleRequestCloseCash = async () => {
     if (!cashStatus?.id) return;
     try {
-      const res = await fetch(`/api/cash/summary/${cashStatus.id}`);
-      const data = await res.json();
-      setCashSummary(data);
+      const sales = await db.sales.where('created_at').aboveOrEqual(cashStatus.opened_at).toArray();
+      const summary = {
+        opening_balance: cashStatus.opening_balance,
+        sales_by_method: sales.reduce((acc, curr) => {
+          if (curr.payment_method === 'cash') acc.cash += curr.total;
+          if (curr.payment_method === 'card') acc.card += curr.total;
+          if (curr.payment_method === 'transfer') acc.transfer += curr.total;
+          return acc;
+        }, { cash: 0, card: 0, transfer: 0 }),
+        total_sales: sales.reduce((sum, s) => sum + s.total, 0)
+      };
+      setCashSummary(summary);
+      setPhysicalCashCount('');
+      setCashNotes('');
       setIsCloseCashModalOpen(true);
     } catch (error) {
       console.error('Error fetching cash summary:', error);
@@ -674,21 +806,25 @@ export default function App() {
   const handleConfirmCloseCash = async () => {
     if (!cashStatus?.id || !cashSummary) return;
     
-    const finalBalance = cashSummary.opening_balance + cashSummary.sales_by_method.cash;
+    const expectedCashBalance = cashSummary.opening_balance + cashSummary.sales_by_method.cash;
+    const actualCashBalance = physicalCashCount === '' ? expectedCashBalance : parseFloat(physicalCashCount);
+    const difference = actualCashBalance - expectedCashBalance;
     
     try {
-      const res = await fetch('/api/cash/close', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: cashStatus.id, closing_balance: finalBalance }),
+      await db.cashRegister.update(cashStatus.id, {
+        closing_balance: expectedCashBalance,
+        actual_closing_balance: actualCashBalance,
+        difference: difference,
+        status: 'closed',
+        closed_at: new Date().toISOString(),
+        notes: cashNotes
       });
-      
-      if (res.ok) {
-        setIsCloseCashModalOpen(false);
-        setCashSummary(null);
-        fetchCashStatus();
-        alert('Caixa fechado com sucesso!');
-      }
+      setIsCloseCashModalOpen(false);
+      setCashSummary(null);
+      setPhysicalCashCount('');
+      setCashNotes('');
+      fetchCashStatus();
+      alert('Caixa fechado com sucesso!');
     } catch (error) {
       console.error('Error closing cash:', error);
       alert('Erro ao fechar caixa');
@@ -726,29 +862,48 @@ export default function App() {
   }, [cashReceived, cartTotal]);
 
   const handleFinalizeSale = async () => {
+    if (!user?.id) return;
+    
+    const invoiceNumber = `FAC-${Date.now()}`;
     const saleData = {
-      user_id: user?.id,
-      items: cart,
+      invoice_number: invoiceNumber,
+      user_id: user.id,
+      customer_name: customerName,
       total: cartTotal,
       discount: 0,
       payment_method: paymentMethod,
-      customer_name: customerName
+      created_at: new Date().toISOString()
     };
 
-    const res = await fetch('/api/sales', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(saleData),
-    });
+    try {
+      await db.transaction('rw', [db.sales, db.saleItems, db.stock, db.products], async () => {
+        const saleId = await db.sales.add(saleData);
+        
+        const saleItemsData = cart.map(item => ({
+          sale_id: saleId as number,
+          product_id: item.id!,
+          quantity: item.quantity,
+          price: item.price
+        }));
+        
+        await db.saleItems.bulkAdd(saleItemsData);
+        
+        // Update stock for non-prepared items
+        for (const item of cart) {
+          if (item.is_prepared === 0) {
+            const currentStock = await db.stock.where('product_id').equals(item.id!).first();
+            if (currentStock) {
+              await db.stock.update(currentStock.id!, { quantity: currentStock.quantity - item.quantity });
+            }
+          }
+        }
+      });
 
-    if (res.ok) {
-      const result = await res.json();
-      
       // Trigger thermal print
       printReceipt({
-        invoice_number: result.invoiceNumber,
-        created_at: new Date().toISOString(),
-        items: cart,
+        invoice_number: invoiceNumber,
+        created_at: saleData.created_at,
+        items: cart.map(item => ({ ...item, product_name: item.name })),
         total: cartTotal,
         payment_method: paymentMethod,
         customer_name: customerName,
@@ -760,6 +915,9 @@ export default function App() {
       setCashReceived('');
       setCustomerName('');
       fetchProducts();
+    } catch (error) {
+      console.error('Error finalizing sale:', error);
+      alert('Erro ao processar venda localmente');
     }
   };
 
@@ -875,15 +1033,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
-            <div className={`flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold border transition-all ${
-              isOnline 
-                ? 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20' 
-                : 'bg-amber-500/10 text-amber-500 border-amber-500/20'
-            }`}>
-              {isOnline ? <Wifi size={14} /> : <WifiOff size={14} />}
-              <span>{isOnline ? 'SISTEMA ONLINE' : 'MODO OFFLINE'}</span>
-            </div>
-
             <div className="flex items-center gap-2 bg-emerald-500/10 text-emerald-500 px-4 py-2 rounded-full text-sm font-medium border border-emerald-500/20">
               <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
               Caixa Aberto
@@ -1201,7 +1350,7 @@ export default function App() {
                       onClick={() => setAdminTab('sync')}
                       className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${adminTab === 'sync' ? 'bg-emerald-500 text-white' : 'text-white/40 hover:text-white'}`}
                     >
-                      Sincronização
+                      Backup e Dados
                     </button>
                   </div>
                   {adminTab === 'products' && (
@@ -1298,11 +1447,30 @@ export default function App() {
                                 >
                                   Editar
                                 </button>
+                                {product.active ? (
+                                  <button 
+                                    onClick={() => handleToggleProductActive(product.id, 0)}
+                                    className="text-amber-500/40 hover:text-amber-500 transition-colors text-xs font-bold"
+                                    title="Desativar produto (não aparecerá no POS)"
+                                  >
+                                    Desativar
+                                  </button>
+                                ) : (
+                                  <button 
+                                    onClick={() => handleToggleProductActive(product.id, 1)}
+                                    className="text-emerald-500/40 hover:text-emerald-500 transition-colors text-xs font-bold"
+                                    title="Ativar produto para aparecer no POS"
+                                  >
+                                    Ativar
+                                  </button>
+                                )}
                                 <button 
                                   onClick={() => handleDeleteProduct(product.id)}
-                                  className="text-red-500/40 hover:text-red-500 transition-colors text-xs font-bold"
+                                  className="text-red-500/40 hover:text-red-500 transition-colors flex items-center gap-1 text-xs font-bold"
+                                  title="Eliminar permanentemente do sistema"
                                 >
-                                  Apagar
+                                  <Trash2 size={14} />
+                                  Remover
                                 </button>
                               </td>
                             </tr>
@@ -1346,14 +1514,16 @@ export default function App() {
                                     setUserForm({ username: u.username, password: '', role: u.role });
                                     setIsUserModalOpen(true);
                                   }}
-                                  className="text-white/40 hover:text-white transition-colors"
+                                  className="text-white/40 hover:text-white transition-colors text-xs font-bold"
                                 >
                                   Editar
                                 </button>
                                 <button 
                                   onClick={() => handleDeleteUser(u.id)}
-                                  className="text-white/40 hover:text-red-500 transition-colors"
+                                  className="text-red-500/40 hover:text-red-500 transition-colors flex items-center gap-1 text-xs font-bold"
+                                  title="Remover utilizador"
                                 >
+                                  <Trash2 size={14} />
                                   Remover
                                 </button>
                               </td>
@@ -1389,14 +1559,19 @@ export default function App() {
                                     setCategoryForm({ name: cat.name });
                                     setIsCategoryModalOpen(true);
                                   }}
-                                  className="text-white/40 hover:text-white transition-colors"
+                                  className="text-white/40 hover:text-white transition-colors text-xs font-bold"
                                 >
                                   Editar
                                 </button>
                                 <button 
-                                  onClick={() => handleDeleteCategory(cat.id)}
-                                  className="text-white/40 hover:text-red-500 transition-colors"
+                                  onClick={() => {
+                                    setCategoryToDelete(cat.id!);
+                                    setIsDeleteCategoryModalOpen(true);
+                                  }}
+                                  className="text-red-500/40 hover:text-red-500 transition-colors flex items-center gap-1 text-xs font-bold"
+                                  title="Remover categoria"
                                 >
+                                  <Trash2 size={14} />
                                   Remover
                                 </button>
                               </td>
@@ -1411,11 +1586,11 @@ export default function App() {
                     <div className="bg-[#141414] border border-white/10 rounded-2xl p-8">
                       <div className="flex items-center gap-4 mb-8">
                         <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center">
-                          <Cloud className="text-emerald-500" size={24} />
+                          <DatabaseIcon className="text-emerald-500" size={24} />
                         </div>
                         <div>
-                          <h4 className="font-bold text-lg">Sincronização e Backups</h4>
-                          <p className="text-white/40 text-sm">Gerencie o backup e acesso online do seu sistema</p>
+                          <h4 className="font-bold text-lg">Gestão de Dados e Backups</h4>
+                          <p className="text-white/40 text-sm">Gerencie a segurança e integridade dos seus dados locais</p>
                         </div>
                       </div>
 
@@ -1426,7 +1601,7 @@ export default function App() {
                             <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-bold px-2 py-1 rounded-full">RECOMENDADO</span>
                           </div>
                           <p className="text-sm text-white/60 mb-6 leading-relaxed">
-                            Exporte todos os seus dados para um ficheiro de segurança que pode guardar em qualquer lugar.
+                            Exporte todos os seus dados para um ficheiro JSON de segurança. Pode usar este ficheiro para restaurar o sistema em outro dispositivo.
                           </p>
                           <div className="flex gap-3">
                             <button 
@@ -1446,56 +1621,44 @@ export default function App() {
 
                         <div className="bg-white/5 border border-white/5 rounded-2xl p-6">
                           <div className="flex items-center justify-between mb-4">
-                            <span className="text-xs font-bold text-white/30 uppercase tracking-widest">Backup do Servidor</span>
-                            <span className="bg-blue-500/10 text-blue-500 text-[10px] font-bold px-2 py-1 rounded-full">AUTOMÁTICO</span>
+                            <span className="text-xs font-bold text-white/30 uppercase tracking-widest">Estado da Base de Dados</span>
+                            <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-bold px-2 py-1 rounded-full">LOCAL</span>
                           </div>
                           <p className="text-sm text-white/60 mb-6 leading-relaxed">
-                            O sistema realiza backups automáticos diários. Pode também forçar um backup agora.
+                            O sistema está a operar em modo local-first. Todos os dados são guardados no armazenamento persistente do seu navegador (IndexedDB).
                           </p>
-                          <button 
-                            onClick={handleManualBackup}
-                            disabled={isBackupLoading}
-                            className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
-                          >
-                            <DatabaseIcon size={18} />
-                            {isBackupLoading ? 'A processar...' : 'Realizar Backup Agora'}
-                          </button>
+                          <div className="flex items-center gap-3 p-4 bg-black/20 rounded-xl border border-white/5">
+                            <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
+                              <DatabaseIcon size={20} />
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold">Base de Dados Ativa</p>
+                              <p className="text-xs text-white/40">Armazenamento Local Seguro</p>
+                            </div>
+                          </div>
                         </div>
                       </div>
 
-                      <div className="bg-white/5 border border-white/5 rounded-2xl overflow-hidden">
-                        <div className="p-6 border-b border-white/10">
-                          <h4 className="font-bold text-sm">Histórico de Backups no Servidor</h4>
+                      <div className="bg-red-500/5 border border-red-500/10 rounded-2xl p-6">
+                        <div className="flex items-center gap-4 mb-4">
+                          <div className="w-10 h-10 bg-red-500/10 rounded-xl flex items-center justify-center">
+                            <AlertTriangle className="text-red-500" size={20} />
+                          </div>
+                          <div>
+                            <h5 className="font-bold text-red-500">Zona de Perigo</h5>
+                            <p className="text-xs text-white/40">Ações irreversíveis que afetam todos os dados</p>
+                          </div>
                         </div>
-                        <div className="divide-y divide-white/5">
-                          {backups.map((b, i) => (
-                            <div key={i} className="p-4 flex items-center justify-between hover:bg-white/5 transition-colors">
-                              <div className="flex items-center gap-4">
-                                <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center text-white/40">
-                                  <FileText size={20} />
-                                </div>
-                                <div>
-                                  <p className="text-sm font-medium text-white">{b.name}</p>
-                                  <p className="text-xs text-white/40">
-                                    {new Date(b.created_at).toLocaleString('pt-PT')} • {(b.size / 1024 / 1024).toFixed(2)} MB
-                                  </p>
-                                </div>
-                              </div>
-                              <button 
-                                onClick={() => deleteBackup(b.name)}
-                                className="p-2 text-white/20 hover:text-red-500 transition-colors"
-                                title="Eliminar Backup"
-                              >
-                                <Trash2 size={18} />
-                              </button>
-                            </div>
-                          ))}
-                          {backups.length === 0 && (
-                            <div className="p-8 text-center text-white/20 text-sm">
-                              Nenhum backup encontrado no servidor.
-                            </div>
-                          )}
-                        </div>
+                        <p className="text-sm text-white/60 mb-6">
+                          O reset do sistema apaga permanentemente todas as vendas, produtos, categorias e utilizadores da base de dados local. Esta ação não pode ser desfeita.
+                        </p>
+                        <button 
+                          onClick={handleResetSystem}
+                          className="bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white border border-red-500/20 px-6 py-3 rounded-xl font-bold transition-all flex items-center gap-2"
+                        >
+                          <Trash2 size={18} />
+                          Limpar Todos os Dados Locais
+                        </button>
                       </div>
                     </div>
                   )}
@@ -1551,23 +1714,8 @@ export default function App() {
                   </div>
 
                   <div className="bg-[#141414] border border-white/10 rounded-2xl p-6">
-                    <h4 className="font-bold mb-4">Segurança e Backup</h4>
-                    <p className="text-sm text-white/40 mb-4">O sistema realiza backups automáticos todos os dias à meia-noite. Pode também realizar um backup manual agora.</p>
-                    <button 
-                      onClick={async () => {
-                        try {
-                          const res = await fetch('/api/admin/backup', { method: 'POST' });
-                          if (res.ok) alert('Backup realizado com sucesso!');
-                          else alert('Erro ao realizar backup.');
-                        } catch (e) {
-                          alert('Erro de conexão ao servidor.');
-                        }
-                      }}
-                      className="w-full bg-white/5 hover:bg-white/10 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
-                    >
-                      <Download size={18} />
-                      Realizar Backup Agora
-                    </button>
+                    <h4 className="font-bold mb-4">Segurança</h4>
+                    <p className="text-sm text-white/40 mb-4">Recomendamos realizar backups regulares exportando os dados na aba "Backup e Dados" para garantir a segurança das suas informações.</p>
                   </div>
                 </div>
               </div>
@@ -1890,29 +2038,59 @@ export default function App() {
                 <p className="text-white/40 text-sm">Resumo do turno atual</p>
               </div>
 
-              <div className="space-y-4 mb-8">
-                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+              <div className="space-y-3 mb-6">
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl text-sm">
                   <span className="text-white/40">Saldo Inicial</span>
                   <span className="font-mono">{cashSummary.opening_balance.toFixed(2)} Kz</span>
                 </div>
-                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl text-sm">
                   <span className="text-white/40">Vendas em Dinheiro</span>
                   <span className="font-mono text-emerald-500">{cashSummary.sales_by_method.cash.toFixed(2)} Kz</span>
                 </div>
-                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl text-sm">
                   <span className="text-white/40">Vendas em Multicaixa</span>
                   <span className="font-mono">{cashSummary.sales_by_method.card.toFixed(2)} Kz</span>
                 </div>
-                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl text-sm">
                   <span className="text-white/40">Vendas por Transferência</span>
                   <span className="font-mono">{cashSummary.sales_by_method.transfer.toFixed(2)} Kz</span>
                 </div>
                 <div className="h-px bg-white/10 my-2" />
                 <div className="flex justify-between p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20">
-                  <span className="font-bold">Total em Caixa</span>
+                  <span className="font-bold">Total Esperado</span>
                   <span className="font-mono font-bold text-emerald-500">
                     {(cashSummary.opening_balance + cashSummary.sales_by_method.cash).toFixed(2)} Kz
                   </span>
+                </div>
+              </div>
+
+              <div className="space-y-4 mb-8">
+                <div>
+                  <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Valor Físico em Caixa (Kz)</label>
+                  <input 
+                    type="number"
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-xl font-mono text-white text-center focus:outline-none focus:border-emerald-500"
+                    placeholder="0.00"
+                    value={physicalCashCount}
+                    onChange={e => setPhysicalCashCount(e.target.value)}
+                  />
+                  {physicalCashCount !== '' && (
+                    <div className="mt-2 flex justify-between text-xs font-bold">
+                      <span className="text-white/40 uppercase">Diferença:</span>
+                      <span className={parseFloat(physicalCashCount) - (cashSummary.opening_balance + cashSummary.sales_by_method.cash) >= 0 ? 'text-emerald-500' : 'text-red-500'}>
+                        {(parseFloat(physicalCashCount) - (cashSummary.opening_balance + cashSummary.sales_by_method.cash)).toFixed(2)} Kz
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Notas / Observações</label>
+                  <textarea 
+                    className="w-full bg-white/5 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500 h-20 resize-none"
+                    placeholder="Alguma observação sobre o turno?"
+                    value={cashNotes}
+                    onChange={e => setCashNotes(e.target.value)}
+                  />
                 </div>
               </div>
 
@@ -1928,6 +2106,135 @@ export default function App() {
                   className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all shadow-xl shadow-red-500/20"
                 >
                   Fechar Caixa
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete User Confirmation Modal */}
+      <AnimatePresence>
+        {isDeleteUserModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsDeleteUserModalOpen(false)}
+              className="absolute inset-0 bg-black/90 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-[#141414] border border-white/10 rounded-3xl p-8 shadow-2xl text-center"
+            >
+              <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-500">
+                <AlertTriangle size={32} />
+              </div>
+              <h3 className="text-2xl font-bold mb-2">Eliminar Utilizador?</h3>
+              <p className="text-white/40 text-sm mb-8">
+                Tem a certeza que deseja eliminar este utilizador? Esta ação não pode ser desfeita.
+              </p>
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setIsDeleteUserModalOpen(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={confirmDeleteUser}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all shadow-xl shadow-red-500/20"
+                >
+                  Sim, Eliminar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Product Confirmation Modal */}
+      <AnimatePresence>
+        {isDeleteProductModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsDeleteProductModalOpen(false)}
+              className="absolute inset-0 bg-black/90 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-[#141414] border border-white/10 rounded-3xl p-8 shadow-2xl text-center"
+            >
+              <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-500">
+                <AlertTriangle size={32} />
+              </div>
+              <h3 className="text-2xl font-bold mb-2">Eliminar Produto?</h3>
+              <p className="text-white/40 text-sm mb-8">
+                Tem a certeza que deseja eliminar este produto permanentemente? Esta ação não pode ser desfeita.
+              </p>
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setIsDeleteProductModalOpen(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={confirmDeleteProduct}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all shadow-xl shadow-red-500/20"
+                >
+                  Sim, Eliminar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Category Confirmation Modal */}
+      <AnimatePresence>
+        {isDeleteCategoryModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsDeleteCategoryModalOpen(false)}
+              className="absolute inset-0 bg-black/90 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-md bg-[#141414] border border-white/10 rounded-3xl p-8 shadow-2xl text-center"
+            >
+              <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-500">
+                <AlertTriangle size={32} />
+              </div>
+              <h3 className="text-2xl font-bold mb-2">Eliminar Categoria?</h3>
+              <p className="text-white/40 text-sm mb-8">
+                Tem a certeza que deseja eliminar esta categoria? Esta ação não pode ser desfeita.
+              </p>
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setIsDeleteCategoryModalOpen(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={() => categoryToDelete && handleDeleteCategory(categoryToDelete)}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all shadow-xl shadow-red-500/20"
+                >
+                  Sim, Eliminar
                 </button>
               </div>
             </motion.div>
