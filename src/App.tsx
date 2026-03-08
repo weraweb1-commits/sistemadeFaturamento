@@ -12,6 +12,7 @@ import {
   Search,
   CheckCircle2,
   XCircle,
+  X,
   CreditCard,
   Banknote,
   ArrowRightLeft,
@@ -24,7 +25,8 @@ import {
   Wifi,
   WifiOff,
   Cloud,
-  Upload
+  Upload,
+  Database as DatabaseIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import jsPDF from 'jspdf';
@@ -105,7 +107,48 @@ export default function App() {
   const [selectedStockProduct, setSelectedStockProduct] = useState<Product | null>(null);
   const [newStockQuantity, setNewStockQuantity] = useState<string>('');
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
+  const [backups, setBackups] = useState<{ name: string, size: number, created_at: string }[]>([]);
+  const [isBackupLoading, setIsBackupLoading] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
+
+  const fetchBackups = async () => {
+    try {
+      const res = await fetch('/api/admin/backups');
+      const data = await res.json();
+      setBackups(data);
+    } catch (error) {
+      console.error('Error fetching backups:', error);
+    }
+  };
+
+  const deleteBackup = async (name: string) => {
+    if (!confirm(`Deseja eliminar o backup ${name}?`)) return;
+    try {
+      const res = await fetch(`/api/admin/backups/${name}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchBackups();
+      }
+    } catch (error) {
+      console.error('Error deleting backup:', error);
+    }
+  };
+
+  const handleManualBackup = async () => {
+    setIsBackupLoading(true);
+    try {
+      const res = await fetch('/api/admin/backup', { method: 'POST' });
+      if (res.ok) {
+        alert('Backup realizado com sucesso!');
+        fetchBackups();
+      }
+    } catch (error) {
+      console.error('Error performing backup:', error);
+    } finally {
+      setIsBackupLoading(false);
+    }
+  };
 
   const exportDatabase = async () => {
     try {
@@ -201,6 +244,8 @@ export default function App() {
       if (view === 'admin') {
         fetchProducts();
         fetchUsers();
+        fetchCategories();
+        fetchBackups();
       }
     }
   }, [user, view]);
@@ -583,6 +628,25 @@ export default function App() {
     }
   };
 
+  const handleUpdatePassword = async () => {
+    if (!newPassword || !user) return;
+    try {
+      const response = await fetch(`/api/users/${user.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...user, password: newPassword })
+      });
+      if (response.ok) {
+        alert('Palavra-passe atualizada com sucesso!');
+        setIsProfileModalOpen(false);
+        setNewPassword('');
+      }
+    } catch (error) {
+      console.error('Erro ao atualizar palavra-passe:', error);
+      alert('Erro ao atualizar palavra-passe');
+    }
+  };
+
   const handleOpenCash = async () => {
     if (!openingBalance) return;
     await fetch('/api/cash/open', {
@@ -719,10 +783,6 @@ export default function App() {
             </div>
             <h1 className="text-2xl font-bold text-white mb-2">POS Restauração</h1>
             <p className="text-white/50 text-sm">Entre com suas credenciais para continuar</p>
-            <div className="mt-4 p-3 bg-white/5 rounded-xl border border-white/10">
-              <p className="text-[10px] text-white/30 uppercase font-bold mb-1">Dica de Acesso</p>
-              <p className="text-xs text-emerald-500/80">Utilizador: <span className="text-white">admin</span> | Senha: <span className="text-white">admin123</span></p>
-            </div>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-6">
@@ -777,7 +837,9 @@ export default function App() {
         <nav className="flex-1 flex flex-col gap-4">
           <SidebarItem icon={<ShoppingCart />} active={view === 'pos'} onClick={() => handleSafeAction('view', 'pos')} label="Vendas" />
           <SidebarItem icon={<ArrowRightLeft />} active={view === 'history'} onClick={() => handleSafeAction('view', 'history')} label="Histórico" />
-          <SidebarItem icon={<Package />} active={view === 'stock'} onClick={() => handleSafeAction('view', 'stock')} label="Stock" />
+          {user.role === 'admin' && (
+            <SidebarItem icon={<Package />} active={view === 'stock'} onClick={() => handleSafeAction('view', 'stock')} label="Stock" />
+          )}
           <SidebarItem icon={<BarChart3 />} active={view === 'reports'} onClick={() => handleSafeAction('view', 'reports')} label="Relatórios" />
           {user.role === 'admin' && (
             <SidebarItem icon={<Settings />} active={view === 'admin'} onClick={() => handleSafeAction('view', 'admin')} label="Admin" />
@@ -802,6 +864,13 @@ export default function App() {
             <div className="flex items-center gap-2 text-white/50 text-sm">
               <UserIcon size={16} />
               <span>{user.username} ({user.role})</span>
+              <button 
+                onClick={() => setIsProfileModalOpen(true)}
+                className="ml-2 p-1.5 hover:bg-white/5 rounded-lg transition-colors text-white/40 hover:text-white"
+                title="Alterar Senha"
+              >
+                <Settings size={14} />
+              </button>
             </div>
           </div>
 
@@ -969,7 +1038,7 @@ export default function App() {
             </div>
           )}
 
-          {view === 'stock' && (
+          {view === 'stock' && user.role === 'admin' && (
             <div className="p-8 h-full overflow-y-auto custom-scrollbar">
               <div className="flex justify-between items-center mb-8">
                 <h3 className="text-2xl font-bold">Gestão de Stock</h3>
@@ -1345,12 +1414,12 @@ export default function App() {
                           <Cloud className="text-emerald-500" size={24} />
                         </div>
                         <div>
-                          <h4 className="font-bold text-lg">Sincronização em Nuvem</h4>
+                          <h4 className="font-bold text-lg">Sincronização e Backups</h4>
                           <p className="text-white/40 text-sm">Gerencie o backup e acesso online do seu sistema</p>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
                         <div className="bg-white/5 border border-white/5 rounded-2xl p-6">
                           <div className="flex items-center justify-between mb-4">
                             <span className="text-xs font-bold text-white/30 uppercase tracking-widest">Backup Local</span>
@@ -1377,29 +1446,56 @@ export default function App() {
 
                         <div className="bg-white/5 border border-white/5 rounded-2xl p-6">
                           <div className="flex items-center justify-between mb-4">
-                            <span className="text-xs font-bold text-white/30 uppercase tracking-widest">Estado Atual</span>
-                            <span className="bg-emerald-500/10 text-emerald-500 text-[10px] font-bold px-2 py-1 rounded-full">TOTALMENTE OFFLINE</span>
+                            <span className="text-xs font-bold text-white/30 uppercase tracking-widest">Backup do Servidor</span>
+                            <span className="bg-blue-500/10 text-blue-500 text-[10px] font-bold px-2 py-1 rounded-full">AUTOMÁTICO</span>
                           </div>
-                          <p className="text-sm text-white/60 leading-relaxed">
-                            O sistema está operando em modo local. Todos os dados são salvos com segurança neste dispositivo.
+                          <p className="text-sm text-white/60 mb-6 leading-relaxed">
+                            O sistema realiza backups automáticos diários. Pode também forçar um backup agora.
                           </p>
+                          <button 
+                            onClick={handleManualBackup}
+                            disabled={isBackupLoading}
+                            className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2"
+                          >
+                            <DatabaseIcon size={18} />
+                            {isBackupLoading ? 'A processar...' : 'Realizar Backup Agora'}
+                          </button>
                         </div>
                       </div>
 
-                      <div className="mt-8 p-6 border border-dashed border-white/10 rounded-2xl flex flex-col items-center text-center">
-                        <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mb-4">
-                          <Cloud size={32} className="text-white/20" />
+                      <div className="bg-white/5 border border-white/5 rounded-2xl overflow-hidden">
+                        <div className="p-6 border-b border-white/10">
+                          <h4 className="font-bold text-sm">Histórico de Backups no Servidor</h4>
                         </div>
-                        <h5 className="font-bold mb-2">Deseja habilitar o acesso online?</h5>
-                        <p className="text-sm text-white/40 max-w-md mb-6">
-                          Esta funcionalidade está em desenvolvimento e será disponibilizada em uma atualização futura para permitir a gestão remota do seu negócio.
-                        </p>
-                        <button 
-                          disabled
-                          className="bg-white/5 text-white/20 px-8 py-3 rounded-xl font-bold cursor-not-allowed"
-                        >
-                          Ativar Sincronização (Brevemente)
-                        </button>
+                        <div className="divide-y divide-white/5">
+                          {backups.map((b, i) => (
+                            <div key={i} className="p-4 flex items-center justify-between hover:bg-white/5 transition-colors">
+                              <div className="flex items-center gap-4">
+                                <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center text-white/40">
+                                  <FileText size={20} />
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium text-white">{b.name}</p>
+                                  <p className="text-xs text-white/40">
+                                    {new Date(b.created_at).toLocaleString('pt-PT')} • {(b.size / 1024 / 1024).toFixed(2)} MB
+                                  </p>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => deleteBackup(b.name)}
+                                className="p-2 text-white/20 hover:text-red-500 transition-colors"
+                                title="Eliminar Backup"
+                              >
+                                <Trash2 size={18} />
+                              </button>
+                            </div>
+                          ))}
+                          {backups.length === 0 && (
+                            <div className="p-8 text-center text-white/20 text-sm">
+                              Nenhum backup encontrado no servidor.
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1769,6 +1865,69 @@ export default function App() {
                   className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-5 rounded-2xl transition-all shadow-xl shadow-emerald-500/20"
                 >
                   Abrir Caixa e Iniciar
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Cash Closing Modal */}
+      <AnimatePresence>
+        {isCloseCashModalOpen && cashSummary && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/90 backdrop-blur-md" />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="relative w-full max-w-md bg-[#141414] border border-white/10 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="text-center mb-8">
+                <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-4 text-red-500">
+                  <Banknote size={32} />
+                </div>
+                <h3 className="text-2xl font-bold mb-2">Fechamento de Caixa</h3>
+                <p className="text-white/40 text-sm">Resumo do turno atual</p>
+              </div>
+
+              <div className="space-y-4 mb-8">
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                  <span className="text-white/40">Saldo Inicial</span>
+                  <span className="font-mono">{cashSummary.opening_balance.toFixed(2)} Kz</span>
+                </div>
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                  <span className="text-white/40">Vendas em Dinheiro</span>
+                  <span className="font-mono text-emerald-500">{cashSummary.sales_by_method.cash.toFixed(2)} Kz</span>
+                </div>
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                  <span className="text-white/40">Vendas em Multicaixa</span>
+                  <span className="font-mono">{cashSummary.sales_by_method.card.toFixed(2)} Kz</span>
+                </div>
+                <div className="flex justify-between p-3 bg-white/5 rounded-xl">
+                  <span className="text-white/40">Vendas por Transferência</span>
+                  <span className="font-mono">{cashSummary.sales_by_method.transfer.toFixed(2)} Kz</span>
+                </div>
+                <div className="h-px bg-white/10 my-2" />
+                <div className="flex justify-between p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20">
+                  <span className="font-bold">Total em Caixa</span>
+                  <span className="font-mono font-bold text-emerald-500">
+                    {(cashSummary.opening_balance + cashSummary.sales_by_method.cash).toFixed(2)} Kz
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setIsCloseCashModalOpen(false)}
+                  className="flex-1 bg-white/5 hover:bg-white/10 text-white font-bold py-4 rounded-2xl transition-all"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={handleConfirmCloseCash}
+                  className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl transition-all shadow-xl shadow-red-500/20"
+                >
+                  Fechar Caixa
                 </button>
               </div>
             </motion.div>
@@ -2212,6 +2371,56 @@ export default function App() {
                     Confirmar
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Profile Modal */}
+      <AnimatePresence>
+        {isProfileModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setIsProfileModalOpen(false)} />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="relative w-full max-w-md bg-[#141414] border border-white/10 rounded-3xl p-8 shadow-2xl"
+            >
+              <div className="flex justify-between items-center mb-8">
+                <h3 className="text-xl font-bold">Meu Perfil</h3>
+                <button onClick={() => setIsProfileModalOpen(false)} className="text-white/40 hover:text-white">
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Utilizador</label>
+                  <input 
+                    type="text"
+                    disabled
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white/40 cursor-not-allowed"
+                    value={user?.username}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-white/40 uppercase tracking-wider mb-2">Nova Palavra-passe</label>
+                  <input 
+                    type="password"
+                    className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                    placeholder="••••••••"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                  />
+                </div>
+                <button 
+                  onClick={handleUpdatePassword}
+                  className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-4 rounded-xl transition-all"
+                >
+                  Atualizar Palavra-passe
+                </button>
               </div>
             </motion.div>
           </div>

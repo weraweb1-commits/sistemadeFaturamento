@@ -257,42 +257,6 @@ app.patch("/api/products/:id/stock", (req, res) => {
   res.json({ success: true });
 });
 
-app.post("/api/categories", (req, res) => {
-  const { name } = req.body;
-  try {
-    const info = db.prepare("INSERT INTO categories (name) VALUES (?)").run(name);
-    res.json({ id: info.lastInsertRowid });
-  } catch (error) {
-    res.status(400).json({ error: "Categoria já existe" });
-  }
-});
-
-app.put("/api/categories/:id", (req, res) => {
-  const { id } = req.params;
-  const { name } = req.body;
-  db.prepare("UPDATE categories SET name = ? WHERE id = ?").run(name, id);
-  res.json({ success: true });
-});
-
-app.delete("/api/categories/:id", (req, res) => {
-  const { id } = req.params;
-  // Check if category has products
-  const count = db.prepare("SELECT COUNT(*) as count FROM products WHERE category_id = ?").get(id) as any;
-  if (count.count > 0) {
-    return res.status(400).json({ error: "Não é possível apagar uma categoria com produtos" });
-  }
-  db.prepare("DELETE FROM categories WHERE id = ?").run(id);
-  res.json({ success: true });
-});
-
-app.delete("/api/products/:id", (req, res) => {
-  const { id } = req.params;
-  db.prepare("DELETE FROM stock WHERE product_id = ?").run(id);
-  db.prepare("DELETE FROM product_price_history WHERE product_id = ?").run(id);
-  db.prepare("DELETE FROM products WHERE id = ?").run(id);
-  res.json({ success: true });
-});
-
 app.get("/api/categories", (req, res) => {
   const categories = db.prepare("SELECT * FROM categories").all();
   res.json(categories);
@@ -331,6 +295,52 @@ app.delete("/api/categories/:id", (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(400).json({ error: "Erro ao eliminar categoria" });
+  }
+});
+
+app.delete("/api/products/:id", (req, res) => {
+  const { id } = req.params;
+  try {
+    db.prepare("DELETE FROM stock WHERE product_id = ?").run(id);
+    db.prepare("DELETE FROM product_price_history WHERE product_id = ?").run(id);
+    db.prepare("DELETE FROM products WHERE id = ?").run(id);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(400).json({ error: "Erro ao eliminar produto" });
+  }
+});
+
+app.get("/api/admin/backups", (req, res) => {
+  try {
+    const files = fs.readdirSync(backupsDir)
+      .filter(f => f.startsWith('pos_backup_'))
+      .map(f => {
+        const stats = fs.statSync(path.join(backupsDir, f));
+        return {
+          name: f,
+          size: stats.size,
+          created_at: stats.mtime.toISOString()
+        };
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    res.json(files);
+  } catch (error) {
+    res.status(500).json({ error: "Erro ao listar backups" });
+  }
+});
+
+app.delete("/api/admin/backups/:name", (req, res) => {
+  const { name } = req.params;
+  try {
+    const filePath = path.join(backupsDir, name);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: "Backup não encontrado" });
+    }
+  } catch (error) {
+    res.status(500).json({ error: "Erro ao eliminar backup" });
   }
 });
 
@@ -425,34 +435,6 @@ app.post("/api/cash/open", (req, res) => {
   const { user_id, opening_balance } = req.body;
   db.prepare("INSERT INTO cash_register (user_id, opening_balance, status) VALUES (?, ?, 'open')").run(user_id, opening_balance);
   res.json({ success: true });
-});
-
-app.get("/api/cash/summary/:id", (req, res) => {
-  const { id } = req.params;
-  const register = db.prepare("SELECT * FROM cash_register WHERE id = ?").get(id) as any;
-  
-  if (!register) {
-    return res.status(404).json({ error: "Caixa não encontrado" });
-  }
-
-  const salesSummary = db.prepare(`
-    SELECT 
-      payment_method,
-      SUM(total) as total_amount
-    FROM sales
-    WHERE created_at >= ?
-    GROUP BY payment_method
-  `).all(register.opened_at) as any[];
-
-  const summary = {
-    opening_balance: register.opening_balance,
-    cash_sales: salesSummary.find(s => s.payment_method === 'cash')?.total_amount || 0,
-    card_sales: salesSummary.find(s => s.payment_method === 'card')?.total_amount || 0,
-    transfer_sales: salesSummary.find(s => s.payment_method === 'transfer')?.total_amount || 0,
-    total_sales: salesSummary.reduce((acc, curr) => acc + curr.total_amount, 0)
-  };
-
-  res.json(summary);
 });
 
 app.post("/api/cash/close", (req, res) => {
